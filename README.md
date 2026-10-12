@@ -25,10 +25,11 @@ You can also put the key in a `.env` file copied from `.env.example`. A key save
 
 1. Search the company name and pick the right match.
 2. Choose a team, or type extra job titles.
-3. Choose Email, Phone, or Both. The default result cap is 25 people, and the maximum is 100.
-4. Click **Find contacts**. Enrichment spends Apollo credits.
-5. Download the CSV. Columns are name, designation, email, phone, linkedin_url, company, domain, location, and seniority.
+3. Leave location on All, or pick one or more countries. For India, you can then pick major cities or leave All cities selected. You can also type other places.
+4. Choose Email, Phone, or Both. Email and Both ask Apollo for a work email and a personal email when a work email is missing. The default result cap is 25 people, and the maximum is 100.
+5. Click **Find contacts**. Enrichment spends Apollo credits.
+6. Download the CSV. Columns are name, designation, email, phone, linkedin_url, company, domain, location, seniority, and last_linkedin_post.
 
-Phone numbers are delivered by Apollo a few minutes after the first response. The page waits and fills them in. Work email is requested; personal email is not.
+Phone numbers are delivered by Apollo a few minutes after the first response. The page waits and fills them in. Apollo does not provide the time of a person's last LinkedIn post, so that column stays blank unless Apollo includes a date. When a date is present, the newest post is listed first.
 
 Keep the server on `127.0.0.1`. The API key is meant for this machine only.

@@ -25,6 +25,7 @@ from app.apollo import (
     contact_from_match,
     contact_from_search,
     csv_safe,
+    sort_by_post_time,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +44,7 @@ CSV_COLUMNS = [
     "domain",
     "location",
     "seniority",
+    "last_linkedin_post",
 ]
 REQUEST_ID_RE = re.compile(r"^-?\d+$")
 
@@ -85,6 +87,7 @@ class ContactSearchIn(BaseModel):
     titles: list[str] = Field(min_length=1)
     contact_type: Literal["email", "phone", "both"] = "email"
     limit: int = 25
+    locations: list[str] = Field(default_factory=list)
 
     @field_validator("organization_id")
     @classmethod
@@ -114,6 +117,24 @@ class ContactSearchIn(BaseModel):
             raise ValueError("Use 30 job titles or fewer.")
         return cleaned
 
+    @field_validator("locations")
+    @classmethod
+    def clean_locations(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for location in value:
+            text = " ".join(str(location).split())
+            key = text.lower()
+            if not text or key in {"all", "*"} or key in seen:
+                continue
+            if len(text) > 80:
+                raise ValueError("A location name is too long.")
+            seen.add(key)
+            cleaned.append(text)
+        if len(cleaned) > 80:
+            raise ValueError("Use 80 locations or fewer.")
+        return cleaned
+
     @field_validator("limit")
     @classmethod
     def clamp_limit(cls, value: int) -> int:
@@ -134,6 +155,7 @@ class ContactRow(BaseModel):
     domain: str = ""
     location: str = ""
     seniority: str = ""
+    last_linkedin_post: str = ""
 
 
 class CsvIn(BaseModel):
@@ -185,6 +207,65 @@ def require_client() -> ApolloClient:
     if not api_key:
         raise HTTPException(status_code=400, detail="Add your Apollo API key first.")
     return ApolloClient(api_key, get_webhook_url())
+
+
+def enrich_detail(person_id: str, person: dict[str, Any], company: dict[str, str]) -> dict[str, str]:
+    detail = {"id": person_id}
+    first_name = str(person.get("first_name") or "").strip()
+    if first_name and "*" not in first_name:
+        detail["first_name"] = first_name
+    if company.get("name"):
+        detail["organization_name"] = company["name"]
+    if company.get("domain"):
+        detail["domain"] = company["domain"]
+    return detail
+
+
+def credit_amount(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def remember_phone_request(enriched: dict[str, Any], reveal_phone: bool, request_ids: list[str]) -> None:
+    request_id = enriched.get("request_id")
+    if reveal_phone and request_id is not None:
+        request_ids.append(str(request_id))
+
+
+def apply_matches(
+    requested_ids: list[str],
+    enriched: dict[str, Any],
+    contacts: dict[str, dict[str, str]],
+    company: dict[str, str],
+) -> list[str]:
+    matches = enriched.get("matches")
+    if not isinstance(matches, list):
+        people = enriched.get("people")
+        matches = people if isinstance(people, list) else []
+    requested = set(requested_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        if isinstance(match, dict) and str(match.get("id") or "") in requested:
+            by_id[str(match["id"])] = match
+    missed: list[str] = []
+    for index, requested_id in enumerate(requested_ids):
+        match = by_id.get(requested_id)
+        if match is None and index < len(matches) and isinstance(matches[index], dict):
+            candidate = matches[index]
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate_id == requested_id:
+                match = candidate
+        if match is None and len(requested_ids) == 1:
+            match = next((item for item in matches if isinstance(item, dict)), None)
+        if not isinstance(match, dict):
+            missed.append(requested_id)
+            continue
+        contact = contact_from_match(match, company)
+        contact["id"] = requested_id
+        contacts[requested_id] = contact
+    return missed
 
 
 def key_hint(api_key: str) -> str:
@@ -253,43 +334,62 @@ async def search_contacts(payload: ContactSearchIn) -> dict[str, Any]:
         "name": payload.company_name.strip(),
         "domain": payload.domain.strip(),
     }
-    people = await client.search_people(payload.organization_id, payload.titles, payload.limit)
-    ordered_ids = [str(person["id"]) for person in people]
+    reveal_email = payload.contact_type in {"email", "both"}
+    reveal_phone = payload.contact_type in {"phone", "both"}
+    people, broadened = await client.search_people(
+        payload.organization_id,
+        payload.titles,
+        payload.limit,
+        payload.locations,
+        prefer_email=reveal_email,
+    )
+    people_by_id = {str(person["id"]): person for person in people}
+    ordered_ids = list(people_by_id)
     contacts = {
         person_id: contact_from_search(person, company)
-        for person, person_id in zip(people, ordered_ids)
+        for person_id, person in people_by_id.items()
     }
-    reveal_phone = payload.contact_type in {"phone", "both"}
-    credits = 0
+    credits = 0.0
     phone_request_ids: list[str] = []
-    warning = ""
+    warnings: list[str] = []
+    if broadened:
+        warnings.append("Apollo had no verified emails for that filter, so this search includes a wider set of people.")
 
-    for batch in chunks(ordered_ids, BULK_ENRICH_SIZE):
+    for batch_ids in chunks(ordered_ids, BULK_ENRICH_SIZE):
+        details = [enrich_detail(person_id, people_by_id[person_id], company) for person_id in batch_ids]
         try:
-            enriched = await client.enrich_batch(batch, reveal_phone)
+            enriched = await client.enrich_batch(details, reveal_email, reveal_phone)
         except ApolloError as exc:
-            if contacts and any(row["email"] or row["linkedin_url"] for row in contacts.values()):
-                warning = exc.message
+            if any(row["email"] or row["linkedin_url"] for row in contacts.values()):
+                warnings.append(exc.message)
                 break
             raise
-        credits += int(enriched.get("credits_consumed") or 0)
-        request_id = enriched.get("request_id")
-        if reveal_phone and request_id is not None:
-            phone_request_ids.append(str(request_id))
-        matches = enriched.get("matches")
-        if not isinstance(matches, list):
-            continue
-        for match in matches:
-            if not isinstance(match, dict) or not match.get("id"):
-                continue
-            contacts[str(match["id"])] = contact_from_match(match, company)
+        credits += credit_amount(enriched.get("credits_consumed"))
+        remember_phone_request(enriched, reveal_phone, phone_request_ids)
+        missed = apply_matches(batch_ids, enriched, contacts, company)
+        for person_id in missed:
+            try:
+                single = await client.enrich_person(enrich_detail(person_id, people_by_id[person_id], company), reveal_email, reveal_phone)
+            except ApolloError as exc:
+                warnings.append(exc.message)
+                break
+            credits += credit_amount(single.get("credits_consumed"))
+            remember_phone_request(single, reveal_phone, phone_request_ids)
+            apply_matches([person_id], single, contacts, company)
 
-    rows = [contacts[person_id] for person_id in ordered_ids if person_id in contacts]
+    rows = sort_by_post_time([contacts[person_id] for person_id in ordered_ids if person_id in contacts])
+    if rows and reveal_email and not any(row["email"] for row in rows):
+        warnings.append("Apollo returned these people without an email. Check that your plan still has credits, or Apollo may not have an email on file.")
+    dated = sum(1 for row in rows if row["last_linkedin_post"])
+    if rows and not dated:
+        warnings.append("Apollo does not include last LinkedIn post times, so these people stay in search order.")
+    elif dated:
+        warnings.append("Sorted with the most recent LinkedIn post first. People without a post time are listed after them.")
     return {
         "contacts": rows,
-        "credits_consumed": credits,
+        "credits_consumed": int(round(credits)),
         "phone_request_ids": phone_request_ids,
-        "warning": warning,
+        "warning": " ".join(warnings),
     }
 
 

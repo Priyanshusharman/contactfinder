@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -99,6 +100,116 @@ def seniority_label(value: Any) -> str:
     return SENIORITY_LABELS.get(value.strip(), value.replace("_", " ").title())
 
 
+def clean_email(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    email = value.strip()
+    if "@" not in email:
+        return ""
+    local = email.split("@", 1)[0].lower()
+    if local in {"email_not_unlocked", "noemail", "none", "unavailable"}:
+        return ""
+    return email
+
+
+def extract_email(match: dict[str, Any]) -> str:
+    found: list[str] = []
+
+    def add(value: Any) -> None:
+        email = clean_email(value)
+        if email and email.lower() not in {item.lower() for item in found}:
+            found.append(email)
+
+    add(match.get("email"))
+    contact = match.get("contact")
+    if isinstance(contact, dict):
+        add(contact.get("email"))
+        add(contact.get("sanitized_email"))
+    personal = match.get("personal_emails")
+    if isinstance(personal, list):
+        for item in personal:
+            add(item if isinstance(item, str) else item.get("email") if isinstance(item, dict) else "")
+    emails = match.get("emails")
+    if isinstance(emails, list):
+        for item in emails:
+            add(item if isinstance(item, str) else item.get("email") if isinstance(item, dict) else "")
+    return "; ".join(found)
+
+
+def extract_phone(match: dict[str, Any]) -> str:
+    numbers: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        text = value.strip()
+        key = "".join(character for character in text if character.isdigit())
+        if text and key and key not in seen:
+            seen.add(key)
+            numbers.append(text)
+
+    joined = join_phones(match.get("phone_numbers"))
+    if joined:
+        for part in joined.split("; "):
+            add(part)
+    for key in ("sanitized_phone", "phone", "direct_phone", "mobile_phone", "corporate_phone"):
+        value = match.get(key)
+        if isinstance(value, str):
+            add(value)
+    contact = match.get("contact")
+    if isinstance(contact, dict):
+        for key in ("sanitized_phone", "phone"):
+            value = contact.get(key)
+            if isinstance(value, str):
+                add(value)
+        contact_joined = join_phones(contact.get("phone_numbers"))
+        if contact_joined:
+            for part in contact_joined.split("; "):
+                add(part)
+    return "; ".join(numbers)
+
+
+def parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def extract_post_time(match: dict[str, Any]) -> str:
+    keys = (
+        "linkedin_last_post_date",
+        "last_linkedin_post_at",
+        "linkedin_post_date",
+        "last_post_date",
+        "linkedin_last_activity_date",
+    )
+    sources: list[Any] = [match]
+    linkedin = match.get("linkedin")
+    if isinstance(linkedin, dict):
+        sources.append(linkedin)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            parsed = parse_time(source.get(key))
+            if parsed is not None:
+                return parsed.isoformat()
+    return ""
+
+
+def sort_by_post_time(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    def key(row: dict[str, str]) -> tuple[int, float]:
+        parsed = parse_time(row.get("last_linkedin_post"))
+        if parsed is None:
+            return (1, 0.0)
+        return (0, -parsed.timestamp())
+
+    return sorted(rows, key=key)
+
+
 def display_name(record: dict[str, Any]) -> str:
     name = record.get("name")
     if isinstance(name, str) and name.strip():
@@ -137,6 +248,7 @@ def contact_from_search(person: dict[str, Any], company: dict[str, Any]) -> dict
         "domain": str(company.get("domain") or ""),
         "location": "",
         "seniority": "",
+        "last_linkedin_post": "",
     }
 
 
@@ -146,13 +258,14 @@ def contact_from_match(match: dict[str, Any], company: dict[str, Any]) -> dict[s
         "id": str(match.get("id") or ""),
         "name": display_name(match),
         "designation": str(match.get("title") or ""),
-        "email": str(match.get("email") or ""),
-        "phone": join_phones(match.get("phone_numbers")),
+        "email": extract_email(match),
+        "phone": extract_phone(match),
         "linkedin_url": str(match.get("linkedin_url") or ""),
         "company": str(organization.get("name") or company.get("name") or ""),
         "domain": str(organization.get("primary_domain") or company.get("domain") or ""),
         "location": location_of(match),
         "seniority": seniority_label(match.get("seniority")),
+        "last_linkedin_post": extract_post_time(match),
     }
 
 
@@ -221,6 +334,22 @@ class ApolloClient:
         organization_id: str,
         titles: list[str],
         limit: int,
+        locations: list[str] | None = None,
+        prefer_email: bool = False,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        email_statuses = ["verified", "likely to engage"] if prefer_email else None
+        people = await self._search_people(organization_id, titles, limit, locations or [], email_statuses)
+        if prefer_email and not people:
+            return await self._search_people(organization_id, titles, limit, locations or [], None), True
+        return people, False
+
+    async def _search_people(
+        self,
+        organization_id: str,
+        titles: list[str],
+        limit: int,
+        locations: list[str],
+        email_statuses: list[str] | None,
     ) -> list[dict[str, Any]]:
         params: list[tuple[str, str]] = [
             ("organization_ids[]", organization_id),
@@ -229,26 +358,70 @@ class ApolloClient:
             ("per_page", str(limit)),
         ]
         params.extend(("person_titles[]", title) for title in titles)
+        params.extend(("person_locations[]", location) for location in locations)
+        if email_statuses:
+            params.extend(("contact_email_status[]", status) for status in email_statuses)
         data = await self._request("POST", "/mixed_people/api_search", params=params)
         people = data.get("people") if isinstance(data, dict) else None
         if not isinstance(people, list):
             return []
         return [person for person in people if isinstance(person, dict) and person.get("id")]
 
-    async def enrich_batch(self, person_ids: list[str], reveal_phone: bool) -> dict[str, Any]:
+    async def enrich_batch(
+        self,
+        details: list[dict[str, str]],
+        reveal_email: bool,
+        reveal_phone: bool,
+        use_poll: bool = True,
+    ) -> dict[str, Any]:
+        params = self._reveal_params(reveal_email, reveal_phone, use_poll)
+        try:
+            data = await self._request(
+                "POST",
+                "/people/bulk_match",
+                params=params,
+                json={"details": details},
+            )
+        except ApolloError as exc:
+            if reveal_phone and use_poll and exc.status == 400:
+                return await self.enrich_batch(details, reveal_email, reveal_phone, use_poll=False)
+            raise
+        return data if isinstance(data, dict) else {}
+
+    async def enrich_person(
+        self,
+        detail: dict[str, str],
+        reveal_email: bool,
+        reveal_phone: bool,
+        use_poll: bool = True,
+    ) -> dict[str, Any]:
+        params = self._reveal_params(reveal_email, reveal_phone, use_poll)
+        params.extend((key, value) for key, value in detail.items() if value)
+        try:
+            data = await self._request("POST", "/people/match", params=params)
+        except ApolloError as exc:
+            if reveal_phone and use_poll and exc.status == 400:
+                return await self.enrich_person(detail, reveal_email, reveal_phone, use_poll=False)
+            raise
+        person = data.get("person") if isinstance(data, dict) else None
+        if not isinstance(person, dict):
+            return {}
+        return {
+            "matches": [person],
+            "request_id": data.get("request_id"),
+            "credits_consumed": data.get("credits_consumed") or 0,
+        }
+
+    def _reveal_params(self, reveal_email: bool, reveal_phone: bool, use_poll: bool) -> list[tuple[str, str]]:
         params = [
-            ("reveal_personal_emails", "false"),
+            ("reveal_personal_emails", "true" if reveal_email else "false"),
             ("reveal_phone_number", "true" if reveal_phone else "false"),
         ]
-        if reveal_phone:
+        if reveal_phone and use_poll:
+            params.append(("poll_only", "true"))
+        elif reveal_phone:
             params.append(("webhook_url", self.webhook_url))
-        data = await self._request(
-            "POST",
-            "/people/bulk_match",
-            params=params,
-            json={"details": [{"id": person_id} for person_id in person_ids]},
-        )
-        return data if isinstance(data, dict) else {}
+        return params
 
     async def poll_phones(self, request_id: str) -> dict[str, Any]:
         response = await self._raw("GET", f"/webhook_result/{request_id}")

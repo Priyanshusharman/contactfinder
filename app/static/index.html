@@ -223,6 +223,15 @@
 
     .hidden { display: none; }
 
+    .city-box {
+      max-height: 220px;
+      margin-top: 6px;
+      padding: 8px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
     @media (max-width: 720px) {
       header h1 { font-size: 34px; }
       .row, .key-row, .table-head { display: block; }
@@ -274,6 +283,18 @@
         <label for="custom-titles">Other job titles</label>
         <textarea id="custom-titles" placeholder="Separate titles with commas, for example: head of partnerships, customer success"></textarea>
       </div>
+      <div style="margin-top: 16px">
+        <label>Location</label>
+        <div id="locations" class="chips"></div>
+        <p class="hint">Choose All, or pick more than one country. You can also type cities or countries below.</p>
+        <div id="india-cities-wrap" class="hidden">
+          <label>Cities in India</label>
+          <div id="india-cities" class="chips city-box"></div>
+          <p class="hint">All cities covers everyone in India. Pick one or more cities to narrow the search.</p>
+        </div>
+        <label for="custom-locations">Other places</label>
+        <textarea id="custom-locations" placeholder="Separate places with commas, for example: Mumbai, California, Dubai"></textarea>
+      </div>
       <div class="options">
         <fieldset style="border: 0; padding: 0; margin: 0">
           <legend style="font-size: 14px; font-weight: 600; margin-bottom: 6px">Contact details</legend>
@@ -308,6 +329,7 @@
               <th>Email</th>
               <th>Phone</th>
               <th>LinkedIn</th>
+              <th>Last LinkedIn post</th>
               <th>Location</th>
               <th>Seniority</th>
             </tr>
@@ -329,7 +351,89 @@
       Leadership: ["founder", "chief executive officer", "chief operating officer", "vice president", "director"]
     };
 
+    const LOCATIONS = [
+      "India",
+      "United States",
+      "United Kingdom",
+      "Canada",
+      "United Arab Emirates",
+      "Singapore",
+      "Australia",
+      "Germany",
+      "France",
+      "Netherlands"
+    ];
+
+    const INDIA_CITIES = [
+      "Mumbai",
+      "Delhi",
+      "New Delhi",
+      "Bengaluru",
+      "Hyderabad",
+      "Chennai",
+      "Kolkata",
+      "Pune",
+      "Ahmedabad",
+      "Jaipur",
+      "Surat",
+      "Lucknow",
+      "Kanpur",
+      "Nagpur",
+      "Indore",
+      "Thane",
+      "Bhopal",
+      "Visakhapatnam",
+      "Patna",
+      "Vadodara",
+      "Ghaziabad",
+      "Ludhiana",
+      "Agra",
+      "Nashik",
+      "Faridabad",
+      "Meerut",
+      "Rajkot",
+      "Varanasi",
+      "Srinagar",
+      "Aurangabad",
+      "Amritsar",
+      "Navi Mumbai",
+      "Prayagraj",
+      "Ranchi",
+      "Howrah",
+      "Coimbatore",
+      "Jabalpur",
+      "Gwalior",
+      "Vijayawada",
+      "Jodhpur",
+      "Madurai",
+      "Raipur",
+      "Kota",
+      "Chandigarh",
+      "Guwahati",
+      "Noida",
+      "Gurugram",
+      "Kochi",
+      "Thiruvananthapuram",
+      "Mysuru",
+      "Mangaluru",
+      "Bhubaneswar",
+      "Dehradun",
+      "Hubballi",
+      "Salem",
+      "Tiruchirappalli",
+      "Jamshedpur",
+      "Greater Noida",
+      "Pimpri-Chinchwad",
+      "Kalyan",
+      "Vasai-Virar",
+      "Dhanbad"
+    ];
+
     const selectedTeams = new Set();
+    const selectedLocations = new Set();
+    const selectedIndiaCities = new Set();
+    let allLocations = true;
+    let allIndiaCities = true;
     let companies = [];
     let contacts = [];
     let phoneNote = "";
@@ -344,6 +448,19 @@
     const resultsSection = document.querySelector("#results-section");
     const resultsBody = document.querySelector("#results");
     const emptyNote = document.querySelector("#empty");
+
+    function formatPostTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    }
 
     function text(value) {
       return value == null ? "" : String(value);
@@ -388,6 +505,54 @@
       return titles;
     }
 
+    function indiaCityQuery(city) {
+      if (city === "Bengaluru") return "Bangalore, India";
+      if (city === "Gurugram") return "Gurgaon, India";
+      if (city === "Mysuru") return "Mysore, India";
+      if (city === "Mangaluru") return "Mangalore, India";
+      if (city === "Hubballi") return "Hubli, India";
+      if (city === "Tiruchirappalli") return "Trichy, India";
+      if (city === "Kochi") return "Kochi, India";
+      return `${city}, India`;
+    }
+
+    function collectLocations() {
+      if (allLocations) return [];
+      const custom = document.querySelector("#custom-locations").value
+        .split(/[\n,]/)
+        .map((place) => place.trim())
+        .filter(Boolean);
+      const places = [];
+      selectedLocations.forEach((place) => {
+        if (place === "India" && !allIndiaCities && selectedIndiaCities.size) return;
+        places.push(place);
+      });
+      if (selectedLocations.has("India") && !allIndiaCities) {
+        selectedIndiaCities.forEach((city) => places.push(indiaCityQuery(city)));
+      }
+      return [...places, ...custom];
+    }
+
+    function renderLocationChips() {
+      const allButton = `<button type="button" class="chip" data-location="all" aria-pressed="${allLocations ? "true" : "false"}">All</button>`;
+      const countryButtons = LOCATIONS.map((place) =>
+        `<button type="button" class="chip" data-location="${place}" aria-pressed="${selectedLocations.has(place) ? "true" : "false"}">${place}</button>`
+      ).join("");
+      document.querySelector("#locations").innerHTML = allButton + countryButtons;
+      const showCities = !allLocations && selectedLocations.has("India");
+      document.querySelector("#india-cities-wrap").classList.toggle("hidden", !showCities);
+      renderIndiaCities();
+    }
+
+    function renderIndiaCities() {
+      const box = document.querySelector("#india-cities");
+      const allButton = `<button type="button" class="chip" data-city="all" aria-pressed="${allIndiaCities ? "true" : "false"}">All cities</button>`;
+      const cityButtons = INDIA_CITIES.map((city) =>
+        `<button type="button" class="chip" data-city="${city}" aria-pressed="${selectedIndiaCities.has(city) ? "true" : "false"}">${city}</button>`
+      ).join("");
+      box.innerHTML = allButton + cityButtons;
+    }
+
     function renderCompanies() {
       companyList.innerHTML = "";
       companies.forEach((company, index) => {
@@ -411,10 +576,12 @@
       document.querySelector("#download").disabled = contacts.length === 0;
       contacts.forEach((contact) => {
         const row = document.createElement("tr");
-        const cells = ["name", "designation", "email", "phone", "linkedin_url", "location", "seniority"];
+        const cells = ["name", "designation", "email", "phone", "linkedin_url", "last_linkedin_post", "location", "seniority"];
         cells.forEach((key) => {
           const cell = document.createElement("td");
-          if (key === "linkedin_url" && contact.linkedin_url) {
+          if (key === "last_linkedin_post") {
+            cell.textContent = formatPostTime(contact[key]);
+          } else if (key === "linkedin_url" && contact.linkedin_url) {
             const link = document.createElement("a");
             link.href = contact.linkedin_url;
             link.target = "_blank";
@@ -451,7 +618,10 @@
             pending.delete(requestId);
             contacts = contacts.map((contact) => {
               const phone = data.phones && data.phones[contact.id];
-              return phone ? { ...contact, phone } : contact;
+              if (!phone) return contact;
+              if (!contact.phone || contact.phone === phone) return { ...contact, phone };
+              if (contact.phone.includes(phone)) return contact;
+              return { ...contact, phone: `${contact.phone}; ${phone}` };
             });
           } else if (data.status === "failed") {
             pending.delete(requestId);
@@ -473,6 +643,59 @@
     document.querySelector("#teams").innerHTML = Object.keys(TEAMS).map((team) =>
       `<button type="button" class="chip" data-team="${team}" aria-pressed="false">${team}</button>`
     ).join("");
+
+    renderLocationChips();
+
+    document.querySelector("#locations").addEventListener("click", (event) => {
+      const button = event.target.closest(".chip");
+      if (!button) return;
+      const place = button.dataset.location;
+      if (place === "all") {
+        allLocations = true;
+        selectedLocations.clear();
+        selectedIndiaCities.clear();
+        allIndiaCities = true;
+        document.querySelector("#custom-locations").value = "";
+      } else if (selectedLocations.has(place)) {
+        selectedLocations.delete(place);
+        if (place === "India") {
+          selectedIndiaCities.clear();
+          allIndiaCities = true;
+        }
+        allLocations = selectedLocations.size === 0;
+      } else {
+        allLocations = false;
+        selectedLocations.add(place);
+      }
+      renderLocationChips();
+    });
+
+    document.querySelector("#india-cities").addEventListener("click", (event) => {
+      const button = event.target.closest(".chip");
+      if (!button) return;
+      const city = button.dataset.city;
+      if (city === "all") {
+        allIndiaCities = true;
+        selectedIndiaCities.clear();
+      } else if (selectedIndiaCities.has(city)) {
+        selectedIndiaCities.delete(city);
+        allIndiaCities = selectedIndiaCities.size === 0;
+      } else {
+        allIndiaCities = false;
+        selectedIndiaCities.add(city);
+      }
+      renderIndiaCities();
+    });
+
+    document.querySelector("#custom-locations").addEventListener("input", () => {
+      if (document.querySelector("#custom-locations").value.trim()) {
+        allLocations = false;
+        renderLocationChips();
+      } else if (selectedLocations.size === 0) {
+        allLocations = true;
+        renderLocationChips();
+      }
+    });
 
     document.querySelector("#teams").addEventListener("click", (event) => {
       const button = event.target.closest(".chip");
@@ -569,6 +792,7 @@
             company_name: company.name,
             domain: company.domain || "",
             titles,
+            locations: collectLocations(),
             contact_type: document.querySelector('input[name="contact-type"]:checked').value,
             limit: Number(document.querySelector("#limit").value || 25)
           })
@@ -606,7 +830,8 @@
               company: contact.company || "",
               domain: contact.domain || "",
               location: contact.location || "",
-              seniority: contact.seniority || ""
+              seniority: contact.seniority || "",
+              last_linkedin_post: contact.last_linkedin_post || ""
             }))
           })
         });
